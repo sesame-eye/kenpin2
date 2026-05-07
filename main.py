@@ -1,69 +1,77 @@
 import streamlit as st
 import cv2
 import numpy as np
+from sklearn.neighbors import KNeighborsRegressor
 
-st.set_page_config(page_title="段数カウンター Pro", layout="centered")
-st.title("🔢 段数デジタルカウンター")
-st.write("画像の中央をスキャンして、段の境目を物理的にカウントします。")
+st.set_page_config(page_title="段数カウンター AI-Ver3", layout="centered")
+st.title("🤖 学習型段数カウンター")
 
-# --- 設定（サイドバー） ---
-st.sidebar.header("判定感度の調整")
-# 感度：数字が小さいほど敏感に、大きいほど鈍感になります
-threshold = st.sidebar.slider("感度設定", 10, 100, 35)
+# --- AIの脳（学習データ）の初期化 ---
+if 'brain_data' not in st.session_state:
+    st.session_state.brain_data = [] # 画像の明るさなどの特徴
+    st.session_state.best_thresholds = [] # その時の正解感度
+
+# --- サイドバー：感度設定 ---
+st.sidebar.header("設定")
+manual_threshold = st.sidebar.slider("現在の感度（手動調整用）", 10, 100, 35)
 
 # --- 写真の入力 ---
 option = st.radio("写真の入力方法", ("カメラで撮影", "ライブラリから選ぶ"))
-uploaded_file = st.camera_input("パシャリと撮影") if option == "カメラで撮影" else st.file_uploader("写真を選択", type=['jpg', 'jpeg', 'png'])
+uploaded_file = st.camera_input("撮影") if option == "カメラで撮影" else st.file_uploader("選択", type=['jpg', 'jpeg', 'png'])
 
 if uploaded_file:
-    # 画像読み込み
+    # 画像の読み込みと特徴の抽出
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # 処理用にリサイズ（高さを1000pxに固定して基準を作る）
+    # AIが判断するための「画像の雰囲気（明るさと色の差）」を数値化
+    img_feature = [np.mean(gray), np.std(gray)]
+
+    # --- AIによる感度の自動予測（3回以上学習したら発動） ---
+    current_threshold = manual_threshold
+    if len(st.session_state.brain_data) >= 3:
+        knn = KNeighborsRegressor(n_neighbors=min(3, len(st.session_state.brain_data)))
+        knn.fit(st.session_state.brain_data, st.session_state.best_thresholds)
+        predicted_threshold = knn.predict([img_feature])[0]
+        current_threshold = int(predicted_threshold)
+        st.sidebar.info(f"AI予測により感度を {current_threshold} に自動調整しました")
+
+    # --- 段数カウント処理 ---
+    h, w = img.shape[:2]
     target_h = 1000
     scale = target_h / h
     proc_img = cv2.resize(img, (int(w * scale), target_h))
-    
-    # グレー変換
-    gray = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
-    
-    # 縦方向の変化（エッジ）を抽出
-    # 段の境目（横線）を強調します
+    gray_proc = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
     kernel = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
-    edges = cv2.filter2D(gray, -1, kernel)
+    edges = cv2.filter2D(gray_proc, -1, kernel)
     
-    # 中央付近の3箇所をスキャンして精度を高める
     pw = edges.shape[1]
-    scan_lines = [int(pw * 0.45), int(pw * 0.5), int(pw * 0.55)]
+    # 中央の1本をスキャン
+    line = edges[:, int(pw * 0.5)]
+    count = 0
+    in_peak = False
+    for val in line:
+        if val > current_threshold:
+            if not in_peak:
+                count += 1
+                in_peak = True
+        else:
+            in_peak = False
     
-    counts = []
-    for x in scan_lines:
-        line = edges[:, x]
-        count = 0
-        in_peak = False
-        for val in line:
-            if val > threshold: # 境目を発見
-                if not in_peak:
-                    count += 1
-                    in_peak = True
-            else:
-                in_peak = False
-        counts.append(count)
-    
-    # 3箇所の平均を整数で出す
-    final_ans = int(np.median(counts))
+    # 表示
+    st.image(img, use_column_width=True)
+    st.markdown(f"<h1 style='text-align: center;'>{count} 段</h1>", unsafe_allow_html=True)
 
-    # --- 結果表示 ---
-    st.image(img, caption='スキャン完了', use_column_width=True)
+    # --- ここが「学習ボタン」です ---
+    st.write("---")
+    st.subheader("🎓 AIに正解を覚えさせる")
+    st.write("1. 左のバーを動かして段数を正解に合わせる")
+    st.write("2. 下のボタンを押してAIに記憶させる")
     
-    st.markdown(f"""
-    <div style="text-align: center; background-color: #f0f2f6; padding: 20px; border-radius: 10px;">
-        <h2 style="margin: 0; color: #1f77b4;">判定結果</h2>
-        <span style="font-size: 80px; font-weight: bold; color: #1f77b4;">{final_ans}</span>
-        <span style="font-size: 30px; color: #1f77b4;"> 段</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.info("💡 うまく数えられない場合は、左側の「感度設定」を動かしてみてください。")
+    if st.button("この設定（感度）をAIに覚えさせる"):
+        st.session_state.brain_data.append(img_feature)
+        st.session_state.best_thresholds.append(manual_threshold)
+        st.success(f"学習しました！(現在 {len(st.session_state.brain_data)} パターン記憶済み)")
+        if len(st.session_state.brain_data) < 3:
+            st.warning("あと数回学習させると、自動調整が始まります。")
