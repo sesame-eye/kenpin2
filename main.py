@@ -3,75 +3,86 @@ import cv2
 import numpy as np
 from sklearn.neighbors import KNeighborsRegressor
 
-st.set_page_config(page_title="段数カウンター AI-Ver3", layout="centered")
-st.title("🤖 学習型段数カウンター")
+st.set_page_config(page_title="段数AI Ver4", layout="centered")
+st.title("🛡️ 段数カウントAI Pro")
 
-# --- AIの脳（学習データ）の初期化 ---
+# --- 学習データの初期化 ---
 if 'brain_data' not in st.session_state:
-    st.session_state.brain_data = [] # 画像の明るさなどの特徴
-    st.session_state.best_thresholds = [] # その時の正解感度
+    st.session_state.brain_data = [] # 画像特徴
+    st.session_state.best_thresholds = [] # 正解だった感度
 
-# --- サイドバー：感度設定 ---
-st.sidebar.header("設定")
-manual_threshold = st.sidebar.slider("現在の感度（手動調整用）", 10, 100, 35)
-
-# --- 写真の入力 ---
-option = st.radio("写真の入力方法", ("カメラで撮影", "ライブラリから選ぶ"))
-uploaded_file = st.camera_input("撮影") if option == "カメラで撮影" else st.file_uploader("選択", type=['jpg', 'jpeg', 'png'])
-
-if uploaded_file:
-    # 画像の読み込みと特徴の抽出
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # AIが判断するための「画像の雰囲気（明るさと色の差）」を数値化
-    img_feature = [np.mean(gray), np.std(gray)]
-
-    # --- AIによる感度の自動予測（3回以上学習したら発動） ---
-    current_threshold = manual_threshold
-    if len(st.session_state.brain_data) >= 3:
-        knn = KNeighborsRegressor(n_neighbors=min(3, len(st.session_state.brain_data)))
-        knn.fit(st.session_state.brain_data, st.session_state.best_thresholds)
-        predicted_threshold = knn.predict([img_feature])[0]
-        current_threshold = int(predicted_threshold)
-        st.sidebar.info(f"AI予測により感度を {current_threshold} に自動調整しました")
-
-    # --- 段数カウント処理 ---
+# --- ロジック関数 ---
+def count_layers(img, threshold):
     h, w = img.shape[:2]
-    target_h = 1000
-    scale = target_h / h
-    proc_img = cv2.resize(img, (int(w * scale), target_h))
-    gray_proc = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
+    proc_img = cv2.resize(img, (int(w * (1000/h)), 1000))
+    gray = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
     kernel = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
-    edges = cv2.filter2D(gray_proc, -1, kernel)
-    
-    pw = edges.shape[1]
-    # 中央の1本をスキャン
-    line = edges[:, int(pw * 0.5)]
-    count = 0
-    in_peak = False
+    edges = cv2.filter2D(gray, -1, kernel)
+    line = edges[:, int(edges.shape[1] * 0.5)]
+    count, in_peak = 0, False
     for val in line:
-        if val > current_threshold:
+        if val > threshold:
             if not in_peak:
                 count += 1
                 in_peak = True
-        else:
-            in_peak = False
-    
-    # 表示
-    st.image(img, use_column_width=True)
-    st.markdown(f"<h1 style='text-align: center;'>{count} 段</h1>", unsafe_allow_html=True)
+        else: in_peak = False
+    return count
 
-    # --- ここが「学習ボタン」です ---
-    st.write("---")
-    st.subheader("🎓 AIに正解を覚えさせる")
-    st.write("1. 左のバーを動かして段数を正解に合わせる")
-    st.write("2. 下のボタンを押してAIに記憶させる")
+# --- 入力 ---
+uploaded_file = st.camera_input("撮影")
+
+if uploaded_file:
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    gray_full = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    features = [np.mean(gray_full), np.std(gray_full)]
+
+    # --- AI予測 ＆ 自信度算出 ---
+    current_threshold = 35 # 初期値
+    confidence = 0
     
-    if st.button("この設定（感度）をAIに覚えさせる"):
-        st.session_state.brain_data.append(img_feature)
-        st.session_state.best_thresholds.append(manual_threshold)
-        st.success(f"学習しました！(現在 {len(st.session_state.brain_data)} パターン記憶済み)")
-        if len(st.session_state.brain_data) < 3:
-            st.warning("あと数回学習させると、自動調整が始まります。")
+    if len(st.session_state.brain_data) >= 1:
+        knn = KNeighborsRegressor(n_neighbors=min(3, len(st.session_state.brain_data)))
+        knn.fit(st.session_state.brain_data, st.session_state.best_thresholds)
+        current_threshold = int(knn.predict([features])[0])
+        
+        # 自信度の計算（過去のデータとの距離から簡易算出）
+        dists, _ = knn.kneighbors([features])
+        avg_dist = np.mean(dists)
+        confidence = max(5, min(99, int(100 - (avg_dist * 0.5)))) # 距離が近いほど高%
+    
+    # 判定
+    result_count = count_layers(img, current_threshold)
+
+    # --- 結果表示 ---
+    st.image(img, use_column_width=True)
+    
+    col1, col2 = st.columns(2)
+    col1.metric("判定結果", f"{result_count} 段")
+    col2.metric("AI自信度", f"{confidence}%" if len(st.session_state.brain_data) > 0 else "測定不能")
+
+    # --- 学習セクション（常に表示） ---
+    st.write("---")
+    st.subheader("🎓 AIに正解を教えて鍛える")
+    true_val = st.number_input("本当の段数は何段ですか？", min_value=1, value=result_count)
+    
+    if st.button("この画像を正解として学習させる"):
+        # 逆算ロジック：入力された段数に最も近くなる「感度」を自動で見つける
+        best_t = 35
+        min_diff = 999
+        for t in range(10, 100):
+            c = count_layers(img, t)
+            if abs(c - true_val) < min_diff:
+                min_diff = abs(c - true_val)
+                best_t = t
+        
+        st.session_state.brain_data.append(features)
+        st.session_state.best_thresholds.append(best_t)
+        st.success(f"学習完了！(正解:{true_val}段 / 最適感度:{best_t})")
+        st.rerun()
+
+# データリセット
+if st.sidebar.button("学習データを初期化"):
+    st.session_state.brain_data = []
+    st.session_state.best_thresholds = []
+    st.rerun()
