@@ -3,65 +3,96 @@ import cv2
 import numpy as np
 
 st.set_page_config(page_title="段数カウンター Ver.5", layout="centered")
-st.title("📏 プロ仕様：高精度段数カウンター")
+st.title("🚀 プロフェッショナル段数AI")
 
-uploaded_file = st.sidebar.file_uploader("写真を選択", type=['jpg', 'jpeg', 'png'])
-camera_file = st.camera_input("またはカメラで撮影")
-file = uploaded_file if uploaded_file else camera_file
+# --- 学習データの初期化 ---
+if 'color_profiles' not in st.session_state:
+    st.session_state.color_profiles = [] # 特徴(色)
+    st.session_state.learned_sens = []   # 対応する最適感度
 
-if file:
-    file_bytes = np.asarray(bytearray(file.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    h, w = img.shape[:2]
-    
-    # 1. 鮮明化処理（コントラストを極限まで高めて影を浮き彫りにする）
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    cl = clahe.apply(l)
-    enhanced_img = cv2.merge((cl,a,b))
-    enhanced_img = cv2.cvtColor(enhanced_img, cv2.COLOR_LAB2BGR)
-    gray = cv2.cvtColor(enhanced_img, cv2.COLOR_BGR2GRAY)
+# --- UI：常に表示する学習エリア ---
+st.sidebar.header("🎓 AI学習パネル")
+true_count = st.sidebar.number_input("正解の段数を入力", min_value=1, value=15)
+learn_button = st.sidebar.button("この画像を正解として学習")
 
-    # 2. 横線エッジ強調
-    kernel = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
-    edges = cv2.filter2D(gray, -1, kernel)
+# --- メイン：写真入力 ---
+option = st.radio("写真入力", ("カメラ撮影", "ライブラリ参照"), horizontal=True)
+uploaded_file = st.camera_input("撮影") if option == "カメラ撮影" else st.file_uploader("写真を選択", type=['jpg', 'jpeg', 'png'])
+
+if uploaded_file:
+    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+    raw_img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
     
-    # 3. マルチラインスキャン（画像中央60%の範囲を細かくスキャン）
-    scan_results = []
-    start_x = int(w * 0.2)
-    end_x = int(w * 0.8)
+    # 1. プリセット（色解析）
+    hsv = cv2.cvtColor(raw_img, cv2.COLOR_BGR2HSV)
+    avg_color = [np.mean(hsv[:,:,0]), np.mean(hsv[:,:,1]), np.mean(hsv[:,:,2])]
+
+    # AIが感度を予測
+    target_sens = 30 # デフォルト
+    if st.session_state.color_profiles:
+        dists = [np.linalg.norm(np.array(avg_color) - np.array(p)) for p in st.session_state.color_profiles]
+        nearest_idx = np.argmin(dists)
+        target_sens = st.session_state.learned_sens[nearest_idx]
+
+    # 2. 画像処理（エッジ強調）
+    h, w = raw_img.shape[:2]
+    proc_h = 1200
+    img = cv2.resize(raw_img, (int(w * (proc_h/h)), proc_h))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
     
-    for x in range(start_x, end_x, 10): # 10ピクセルごとにスキャン
-        line = edges[:, x]
-        # ノイズ除去のための閾値処理
-        thresh = np.max(line) * 0.2
-        count = 0
-        peak = False
+    # ソーベルフィルタで横線を強力抽出
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobely = np.absolute(sobely)
+    sobely = np.uint8(sobely)
+
+    # 3. マルチラインスキャン (3箇所で計測して安定性をみる)
+    def count_on_line(x_pos, sens):
+        line = sobely[:, x_pos]
+        c = 0
+        active = False
         for val in line:
-            if val > thresh:
-                if not peak:
-                    count += 1
-                    peak = True
+            if val > sens:
+                if not active:
+                    c += 1
+                    active = True
             else:
-                peak = False
-        if count > 1: # 極端に少ない結果は除外
-            scan_results.append(count)
+                active = False
+        return c
 
-    # 統計的に最も確からしい数値を算出
-    if scan_results:
-        # 外れ値を除いた平均を採用
-        final_ans = int(np.percentile(scan_results, 75)) # 高めに出る値を採用（影が消えやすいため）
-    else:
-        final_ans = 0
+    pw = sobely.shape[1]
+    c1 = count_on_line(int(pw*0.4), target_sens)
+    c2 = count_on_line(int(pw*0.5), target_sens)
+    c3 = count_on_line(int(pw*0.6), target_sens)
+
+    # 平均をとる
+    final_count = int(np.median([c1, c2, c3]))
+    
+    # 自信度：3本のラインがどれだけ一致しているか
+    variance = np.std([c1, c2, c3])
+    conf_score = max(0, min(100, 100 - int(variance * 20)))
+    if len(st.session_state.color_profiles) == 0:
+        conf_score = min(conf_score, 20) # 未学習なら低く
 
     # --- 表示 ---
-    st.image(img, use_column_width=True)
-    st.markdown(f"""
-        <div style="text-align: center; border: 2px solid #1f77b4; padding: 20px; border-radius: 10px;">
-            <h3>判定された段数</h3>
-            <h1 style="font-size: 80px; color: #1f77b4;">{final_ans} <span style="font-size: 30px;">段</span></h1>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    st.warning("⚠️ もしズレが大きい場合は、真横から、できるだけ明るい場所で撮影してください。")
+    st.image(raw_img, use_column_width=True)
+    col1, col2 = st.columns(2)
+    col1.metric("判定結果", f"{final_count} 段")
+    col2.metric("AI自信度", f"{conf_score} %")
+
+    # --- 学習処理 ---
+    if learn_button:
+        # 最適感度を総当たりで逆算 (10〜150)
+        best_s = target_sens
+        min_diff = 999
+        for s in range(10, 150, 2):
+            test_c = count_on_line(int(pw*0.5), s)
+            diff = abs(test_c - true_count)
+            if diff < min_diff:
+                min_diff = diff
+                best_s = s
+        
+        st.session_state.color_profiles.append(avg_color)
+        st.session_state.learned_sens.append(best_s)
+        st.success(f"緑色テープ（感度:{best_s}）を学習しました！")
+        st.rerun()
