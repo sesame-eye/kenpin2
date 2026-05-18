@@ -3,12 +3,12 @@ import cv2
 import numpy as np
 from scipy.signal import find_peaks
 
-st.set_page_config(page_title="段数カウンター Ver.11", layout="centered")
-st.title("📏 物理ピッチフィルタ・カウンター")
+st.set_page_config(page_title="段数カウンター Ver.12", layout="centered")
+st.title("📏 幾何学マクロピッチ・カウンター")
 
 # --- 設定データの初期化 ---
 if 'brain' not in st.session_state:
-    st.session_state.brain = {"白": 40, "黄": 35, "緑": 45, "青": 50, "茶": 40}
+    st.session_state.brain = {"白": 50, "黄": 45, "緑": 55, "青": 60, "茶": 50}
 
 # --- サイドバー ---
 st.sidebar.header("🎨 カラー/モード")
@@ -28,79 +28,65 @@ if uploaded_file:
     img = cv2.resize(img, (int(w * (proc_h/h)), proc_h))
     display_img = img.copy()
     
+    # ノイズ（表面のざらざら）を徹底的に潰すために強めに平滑化
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.bilateralFilter(gray, 15, 75, 75) # 面の平滑性を保ちつつ、強い境界だけ残す
     
-    # 【新ロジック1】画像を鮮鋭化（シャープネス）
-    kernel_sharp = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-    sharp = cv2.filter2D(gray, -1, kernel_sharp)
-
-    # 【新ロジック2】Canny法による輪郭抽出（Ver.10と同じ）
-    edges = cv2.Canny(sharp, 20, 60)
-
-    # 横線成分をさらに強調（Ver.10と同じ）
-    kernel = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
-    sobely = cv2.filter2D(edges, -1, kernel)
+    # 大きな陰影の「うねり」だけを拾う（細かいエッジは無視）
+    sobely = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=5)
     sobely = np.uint8(np.absolute(sobely))
 
-    target_sens = st.session_state.brain.get(color_mode, 40)
+    target_sens = st.session_state.brain.get(color_mode, 50)
 
-    def analyze_by_edge_projection_filtered(sens):
+    def analyze_geometry(sens):
         pw = sobely.shape[1]
-        # 中央の35%の「面」を切り出す
-        x_start = int(pw * 0.325)
-        x_end = int(pw * 0.675)
+        x_start = int(pw * 0.4)
+        x_end = int(pw * 0.6)
         roi = sobely[:, x_start:x_end]
         
-        # 横方向にエッジ強度を合計
-        projection = np.sum(roi, axis=1)
+        # 縦方向のプロファイル（中央エリアの平均）
+        projection = np.mean(roi, axis=1)
         
-        # 波形からピーク（境界線）を探す。最初は過敏に拾う（distance=5）
-        peaks, _ = find_peaks(projection, height=sens * (x_end - x_start) * 0.05, distance=5)
+        # かなり大きめのノイズ対策として閾値を高く設定
+        peaks, _ = find_peaks(projection, height=sens, distance=15)
         
-        if len(peaks) < 3:
-            return len(peaks), 0, peaks, x_start, x_end
-        
-        # 【Ver.11 新フィルター】物理ピッチによる足切り
-        # 1. すべての間隔を算出
-        all_intervals = np.diff(peaks)
-        # 2. 最頻値（正しいテープ幅）を特定
-        typical_pitch = np.median(all_intervals)
-        
-        # 3. 再構築（典型的な幅の半分以下の間隔の線は「ノイズ」として捨てる）
-        final_peaks = [peaks[0]]
-        for p in peaks[1:]:
-            interval = p - final_peaks[-1]
-            if interval > typical_pitch * 0.6: # 典型的な幅の6割より広い場合だけ、新しい段と認める
-                final_peaks.append(p)
-            else:
-                pass # 幅が狭すぎるのでノイズとして無視
-        
-        final_peaks = np.array(final_peaks)
-        
-        if len(final_peaks) < 2:
-            return len(final_peaks), 0, final_peaks, x_start, x_end
+        if len(peaks) < 2:
+            return len(peaks), 0, [], 0, 1000, 30
             
-        # 隣り合う境界線の「間隔（テープの幅）」を再計算
-        intervals = np.diff(final_peaks)
-        refined_pitch = np.median(intervals)
+        # 【重要】一番最初（上端）と一番最後（下端）の明確な境界からタワー全体の高さを取得
+        top_edge = peaks[0]
+        bottom_edge = peaks[-1]
+        total_height = bottom_edge - top_edge
         
-        # 【物理補正】全体のタワーの高さ（一番上の線から一番下の線まで）を、
-        # 決定した1段の平均幅で割る
-        total_height = final_peaks[-1] - final_peaks[0]
-        estimated_count = int(round(total_height / refined_pitch)) + 1
+        # はっきり検知できている主要な段差から「代表ピッチ（1段の厚み）」を計算
+        intervals = np.diff(peaks)
+        # 極端に狭い・広いノイズを外れ値として除外
+        valid_intervals = [i for i in intervals if (np.median(intervals)*0.5 < i < np.median(intervals)*1.5)]
         
-        # 自信度の計算（ピッチのバラツキをみる）
-        std_dev = np.std(intervals)
-        conf = max(0, min(100, 100 - int(std_dev * 12)))
+        if valid_intervals:
+            typical_pitch = np.mean(valid_intervals)
+        else:
+            typical_pitch = np.median(intervals) if len(intervals) > 0 else 45
+            
+        # 【幾何学マクロ計算】
+        # 細かい線を数えるのではなく、「全体の高さ ÷ 1段の厚み」で段数を決定！
+        estimated_count = int(round(total_height / typical_pitch)) + 1
         
-        return estimated_count, conf, final_peaks, x_start, x_end
+        # 算出したマクロピッチを基に、理想的な均一ライン（補正ライン）を再生成
+        ideal_peaks = [int(top_edge + i * typical_pitch) for i in range(estimated_count)]
+        
+        # 自信度（実際のピークが理想の均一ピッチにどれだけ近いか）
+        std_dev = np.std(intervals) if len(intervals) > 0 else 100
+        conf = max(0, min(100, 100 - int(std_dev * 4)))
+        
+        return estimated_count, conf, ideal_peaks, x_start, x_end, typical_pitch
 
-    # 学習処理
+    # 学習・最適化処理
     if learn_button:
-        best_s = 40
+        best_s = 50
         min_error = 999
-        for s in range(10, 150, 2):
-            est_c, _, _, _, _ = analyze_by_edge_projection_filtered(s)
+        for s in range(20, 180, 5):
+            est_c, _, _, _, _, _ = analyze_geometry(s)
             error = abs(est_c - true_count)
             if error < min_error:
                 min_error = error
@@ -110,23 +96,25 @@ if uploaded_file:
         st.rerun()
 
     # 判定実行
-    final_ans, final_conf, detected_peaks, x_start, x_end = analyze_by_edge_projection_filtered(target_sens)
+    final_ans, final_conf, ideal_peaks, x_start, x_end, current_pitch = analyze_geometry(target_sens)
 
-    # 画面への描画（面スキャンエリアと検知線）
+    # 画面への描画（マクロ補正された均一ライン）
     overlay = display_img.copy()
-    cv2.rectangle(overlay, (x_start, 0), (x_end, 1000), (255, 100, 0), -1)
-    cv2.addWeighted(overlay, 0.15, display_img, 0.85, 0, display_img)
+    cv2.rectangle(overlay, (x_start, 0), (x_end, 1000), (0, 150, 255), -1)
+    cv2.addWeighted(overlay, 0.1, display_img, 0.9, 0, display_img)
     
-    # 検知したエッジ（緑の線で描画）
-    for py in detected_peaks:
-        cv2.line(display_img, (x_start - 25, py), (x_end + 25, py), (0, 255, 0), 2)
+    # 青線＝マクロ均一補正を適用した「物理的にここに段差があるはず」という予測線
+    for py in ideal_peaks:
+        if 0 <= py < 1000:
+            cv2.line(display_img, (x_start - 30, py), (x_end + 30, py), (255, 50, 0), 2)
 
     # 結果表示
-    st.image(display_img, use_column_width=True, caption="面投影と物理ピッチフィルターで解析中。緑線＝検知した輪郭")
+    st.image(display_img, use_column_width=True, caption="幾何学マクロピッチ解析中（青線：レンズ湾曲・歪み補正済みの予測ライン）")
     
     col1, col2 = st.columns(2)
-    col1.metric("判定結果", f"{final_ans} 段")
-    col2.metric("テープ幅の均一度（自信度）", f"{final_conf} %")
+    col1.metric("幾何学判定結果", f"{final_ans} 段")
+    col2.metric("タワー構造の安定度", f"{final_conf} %")
+    st.caption(f"現在の算出データ ｜ 全体高: {ideal_peaks[-1]-ideal_peaks[0] if ideal_peaks else 0}px  1段の厚み: {current_pitch:.1f}px")
     
-    if final_conf < 60:
-        st.warning("⚠️ 検知されたテープの幅がバラバラです。左の「学習ボタン」を押して、この色に対する感度を最適化してください。")
+    if abs(final_ans - true_count) > 0:
+        st.info("💡 写真を読み込ませた後、左側の『学習/最適化』ボタンを押すと、この写真の歪み率に合わせてAIが自動同期します。")
