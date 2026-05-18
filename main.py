@@ -3,8 +3,8 @@ import cv2
 import numpy as np
 from scipy.signal import find_peaks
 
-st.set_page_config(page_title="段数カウンター Ver.8", layout="centered")
-st.title("📏 均一ピッチ・面投影カウンター")
+st.set_page_config(page_title="段数カウンター Ver.9", layout="centered")
+st.title("📏 輪郭エッジ解析カウンター")
 
 # --- 設定データの初期化 ---
 if 'brain' not in st.session_state:
@@ -29,53 +29,62 @@ if uploaded_file:
     display_img = img.copy()
     
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    # 横線（境界の影）を強烈に引き出す
-    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    sobely = np.absolute(sobely)
-    sobely = np.uint8(sobely)
+    # 【新ロジック1】画像を鮮鋭化（シャープネス）
+    # これにより、見えなくなっているエッジ（境目）を際立たせる
+    kernel_sharp = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+    sharp = cv2.filter2D(gray, -1, kernel_sharp)
+
+    # 【新ロジック2】Canny法による輪郭抽出
+    # 影の暗さではなく、エッジ（物理的な輪郭）を直接捉える
+    # 閾値は低めに設定して、薄い線も逃さないようにする
+    edges = cv2.Canny(sharp, 20, 60)
+
+    # 横線成分をさらに強調
+    kernel = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
+    sobely = cv2.filter2D(edges, -1, kernel)
+    sobely = np.uint8(np.absolute(sobely))
 
     target_sens = st.session_state.brain.get(color_mode, 40)
 
-    def analyze_by_projection(sens):
+    def analyze_by_edge_projection(sens):
         pw = sobely.shape[1]
-        # 中央の30%の「面」を切り出す
-        x_start = int(pw * 0.35)
-        x_end = int(pw * 0.65)
+        # 中央の35%の「面」を切り出す
+        x_start = int(pw * 0.325)
+        x_end = int(pw * 0.675)
         roi = sobely[:, x_start:x_end]
         
-        # 【新ロジック】横方向にエッジ強度を合計（面での投影）
-        # これにより、斜めの線や薄い影でも「横線の塊」として綺麗に波形になります
+        # 横方向にエッジ強度を合計（面での投影）
+        # 斜めの線やぼやけたエッジでも「横線の塊」として捉える
         projection = np.sum(roi, axis=1)
         
         # 波形からピーク（境界線）を探す
-        peaks, _ = find_peaks(projection, height=sens * (x_end - x_start) * 0.3, distance=10)
+        peaks, _ = find_peaks(projection, height=sens * (x_end - x_start) * 0.05, distance=10)
         
         if len(peaks) < 2:
             return len(peaks), 0, peaks, x_start, x_end
         
-        # 隣り合う境界線の「間隔（テープの幅）」をすべて計算
+        # 隣り合う境界線の「間隔（テープの幅）」を計算
         intervals = np.diff(peaks)
-        # 最も頻出する「正しい1段の幅（ピッチ）」を決定
         typical_pitch = np.median(intervals)
         
-        # 【物理補正】全体のタワーの高さ（一番上の線から一番下の線まで）を、決定した1段の幅で割る
+        # 【物理補正】全体のタワーの高さ（一番上の線から一番下の線まで）を、
+        # 決定した1段の平均幅で割る
         total_height = peaks[-1] - peaks[0]
         estimated_count = int(round(total_height / typical_pitch)) + 1
         
-        # 均一性（自信度）の計算
+        # 自信度の計算（ピッチのバラツキをみる）
         std_dev = np.std(intervals)
-        conf = max(0, min(100, 100 - int(std_dev * 8)))
+        conf = max(0, min(100, 100 - int(std_dev * 10)))
         
         return estimated_count, conf, peaks, x_start, x_end
 
-    # 学習・感度最適化処理
+    # 学習処理
     if learn_button:
         best_s = 40
         min_error = 999
-        for s in range(10, 150, 2):
-            est_c, _, _, _, _ = analyze_by_projection(s)
+        for s in range(10, 120, 2):
+            est_c, _, _, _, _ = analyze_by_edge_projection(s)
             error = abs(est_c - true_count)
             if error < min_error:
                 min_error = error
@@ -85,20 +94,19 @@ if uploaded_file:
         st.rerun()
 
     # 判定実行
-    final_ans, final_conf, detected_peaks, x_start, x_end = analyze_by_projection(target_sens)
+    final_ans, final_conf, detected_peaks, x_start, x_end = analyze_by_edge_projection(target_sens)
 
     # 画面への描画（面スキャンエリアと検知線）
-    # スキャンエリアを薄い青の透過膜で表示
     overlay = display_img.copy()
     cv2.rectangle(overlay, (x_start, 0), (x_end, 1000), (255, 100, 0), -1)
     cv2.addWeighted(overlay, 0.15, display_img, 0.85, 0, display_img)
     
-    # 認識した境界線（緑の線でプロット）
+    # 検知したエッジ（緑の線で描画）
     for py in detected_peaks:
-        cv2.line(display_img, (x_start - 20, py), (x_end + 20, py), (0, 255, 0), 2)
+        cv2.line(display_img, (x_start - 25, py), (x_end + 25, py), (0, 255, 0), 2)
 
-    # 表示
-    st.image(display_img, use_column_width=True, caption="青いエリアの『面』で影の塊を解析中。緑線＝検知した段の区切り")
+    # 結果表示
+    st.image(display_img, use_column_width=True, caption="面でのエッジ投影解析中。緑線＝検知した輪郭")
     
     col1, col2 = st.columns(2)
     col1.metric("判定結果", f"{final_ans} 段")
