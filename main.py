@@ -1,9 +1,10 @@
 import streamlit as st
 import cv2
 import numpy as np
+from scipy.signal import find_peaks
 
-st.set_page_config(page_title="段数カウンター Ver.7 (可視化版)", layout="centered")
-st.title("📏 均一ピッチ解析カウンター (検知ライン表示)")
+st.set_page_config(page_title="段数カウンター Ver.8", layout="centered")
+st.title("📏 均一ピッチ・面投影カウンター")
 
 # --- 設定データの初期化 ---
 if 'brain' not in st.session_state:
@@ -25,90 +26,83 @@ if uploaded_file:
     h, w = img.shape[:2]
     proc_h = 1000
     img = cv2.resize(img, (int(w * (proc_h/h)), proc_h))
-    
-    # 表示用（線を引くターゲット画像）
     display_img = img.copy()
     
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    edges = np.absolute(edges)
-    edges = np.uint8(edges)
+    
+    # 横線（境界の影）を強烈に引き出す
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobely = np.absolute(sobely)
+    sobely = np.uint8(sobely)
 
     target_sens = st.session_state.brain.get(color_mode, 40)
 
-    def analyze_stack(sens):
-        pw = edges.shape[1]
-        # 中央付近で5本スキャン
-        x_points = [int(pw*0.4), int(pw*0.45), int(pw*0.5), int(pw*0.55), int(pw*0.6)]
-        all_peaks = []
+    def analyze_by_projection(sens):
+        pw = sobely.shape[1]
+        # 中央の30%の「面」を切り出す
+        x_start = int(pw * 0.35)
+        x_end = int(pw * 0.65)
+        roi = sobely[:, x_start:x_end]
         
-        for x in x_points:
-            line = edges[:, x]
-            peaks = []
-            for y, val in enumerate(line):
-                if val > sens:
-                    if not peaks or (y - peaks[-1] > 6): 
-                        peaks.append(y)
-            all_peaks.append(peaks)
+        # 【新ロジック】横方向にエッジ強度を合計（面での投影）
+        # これにより、斜めの線や薄い影でも「横線の塊」として綺麗に波形になります
+        projection = np.sum(roi, axis=1)
         
-        counts = [len(p) for p in all_peaks]
-        median_count = int(np.median(counts))
+        # 波形からピーク（境界線）を探す
+        peaks, _ = find_peaks(projection, height=sens * (x_end - x_start) * 0.3, distance=10)
         
-        # 画面に赤い「検知線」を描画する処理（中央のラインを代表として描画）
-        target_peaks = all_peaks[2] # 真ん中のスキャンライン
-        for py in target_peaks:
-            cv2.line(display_img, (int(pw*0.35), py), (int(pw*0.65), py), (0, 0, 255), 3) # 赤い太線
+        if len(peaks) < 2:
+            return len(peaks), 0, peaks, x_start, x_end
+        
+        # 隣り合う境界線の「間隔（テープの幅）」をすべて計算
+        intervals = np.diff(peaks)
+        # 最も頻出する「正しい1段の幅（ピッチ）」を決定
+        typical_pitch = np.median(intervals)
+        
+        # 【物理補正】全体のタワーの高さ（一番上の線から一番下の線まで）を、決定した1段の幅で割る
+        total_height = peaks[-1] - peaks[0]
+        estimated_count = int(round(total_height / typical_pitch)) + 1
+        
+        # 均一性（自信度）の計算
+        std_dev = np.std(intervals)
+        conf = max(0, min(100, 100 - int(std_dev * 8)))
+        
+        return estimated_count, conf, peaks, x_start, x_end
 
-        # スキャンエリアの枠（青）
-        cv2.rectangle(display_img, (int(pw*0.38), 0), (int(pw*0.62), 1000), (255, 0, 0), 2)
-        
-        intervals = []
-        for p in all_peaks:
-            if len(p) > 2:
-                intervals.extend(np.diff(p))
-        
-        if intervals:
-            std_dev = np.std(intervals)
-            conf = max(0, min(100, 100 - int(std_dev * 5)))
-        else:
-            conf = 0
-            
-        return median_count, conf
-
-    # 学習処理（逆算）
+    # 学習・感度最適化処理
     if learn_button:
-        best_s = 30
+        best_s = 40
         min_error = 999
-        for s in range(10, 120, 2):
-            # 描画が干渉しないようダミーで計算
-            pw_d = edges.shape[1]
-            x_points_d = [int(pw_d*0.4), int(pw_d*0.45), int(pw_d*0.5), int(pw_d*0.55), int(pw_d*0.6)]
-            counts_d = []
-            for x in x_points_d:
-                line = edges[:, x]
-                peaks = []
-                for y, val in enumerate(line):
-                    if val > s:
-                        if not peaks or (y - peaks[-1] > 6): peaks.append(y)
-                counts_d.append(len(peaks))
-            res_c = int(np.median(counts_d))
-            
-            if abs(res_c - true_count) < min_error:
-                min_error = abs(res_c - true_count)
+        for s in range(10, 150, 2):
+            est_c, _, _, _, _ = analyze_by_projection(s)
+            error = abs(est_c - true_count)
+            if error < min_error:
+                min_error = error
                 best_s = s
         st.session_state.brain[color_mode] = best_s
-        st.sidebar.success(f"最適化完了: 感度{best_s}")
+        st.sidebar.success(f"最適化完了: 感度 {best_s}")
         st.rerun()
 
     # 判定実行
-    final_ans, final_conf = analyze_stack(target_sens)
+    final_ans, final_conf, detected_peaks, x_start, x_end = analyze_by_projection(target_sens)
+
+    # 画面への描画（面スキャンエリアと検知線）
+    # スキャンエリアを薄い青の透過膜で表示
+    overlay = display_img.copy()
+    cv2.rectangle(overlay, (x_start, 0), (x_end, 1000), (255, 100, 0), -1)
+    cv2.addWeighted(overlay, 0.15, display_img, 0.85, 0, display_img)
+    
+    # 認識した境界線（緑の線でプロット）
+    for py in detected_peaks:
+        cv2.line(display_img, (x_start - 20, py), (x_end + 20, py), (0, 255, 0), 2)
 
     # 表示
-    st.image(display_img, use_column_width=True, caption="青枠内をスキャン中。赤線＝AIが認識した隙間")
+    st.image(display_img, use_column_width=True, caption="青いエリアの『面』で影の塊を解析中。緑線＝検知した段の区切り")
+    
     col1, col2 = st.columns(2)
     col1.metric("判定結果", f"{final_ans} 段")
-    col2.metric("均一性（自信度）", f"{final_conf} %")
+    col2.metric("テープ幅の均一度（自信度）", f"{final_conf} %")
     
-    if final_conf < 50:
-        st.warning("⚠️ 赤線が等間隔に並んでいない、または飛んでいます。学習ボタンで感度を最適化してください。")
+    if final_conf < 60:
+        st.warning("⚠️ 影の検知が一部飛んでいます。左の「学習ボタン」を押して、この色に対する感度を最適化してください。")
