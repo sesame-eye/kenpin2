@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 from scipy.signal import find_peaks
 
-st.set_page_config(page_title="段数カウンター Ver.10", layout="centered")
+st.set_page_config(page_title="段数カウンター Ver.11", layout="centered")
 st.title("📏 物理ピッチフィルタ・カウンター")
 
 # --- 設定データの初期化 ---
@@ -34,10 +34,10 @@ if uploaded_file:
     kernel_sharp = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
     sharp = cv2.filter2D(gray, -1, kernel_sharp)
 
-    # 【新ロジック2】Canny法による輪郭抽出（Ver.9と同じ）
+    # 【新ロジック2】Canny法による輪郭抽出（Ver.10と同じ）
     edges = cv2.Canny(sharp, 20, 60)
 
-    # 横線成分をさらに強調（Ver.9と同じ）
+    # 横線成分をさらに強調（Ver.10と同じ）
     kernel = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
     sobely = cv2.filter2D(edges, -1, kernel)
     sobely = np.uint8(np.absolute(sobely))
@@ -60,7 +60,7 @@ if uploaded_file:
         if len(peaks) < 3:
             return len(peaks), 0, peaks, x_start, x_end
         
-        # 【Ver.10 新フィルター】物理ピッチによる足切り
+        # 【Ver.11 新フィルター】物理ピッチによる足切り
         # 1. すべての間隔を算出
         all_intervals = np.diff(peaks)
         # 2. 最頻値（正しいテープ幅）を特定
