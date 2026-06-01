@@ -132,4 +132,25 @@ if uploaded_file:
     
     # タワーの中心軸（薄い青のシースルー線）
     overlay = display_img.copy()
-    cv2.line(overlay, (int(top_edge_center[0]), int(top_edge_center[1])), (int(bottom_edge_center[0]), int(bottom_edge_center[1])), (255,
+    cv2.line(overlay, (int(top_edge_center[0]), int(top_edge_center[1])), (int(bottom_edge_center[0]), int(bottom_edge_center[1])), (255, 150, 50), 25)
+    cv2.addWeighted(overlay, 0.15, display_img, 0.85, 0, display_img)
+
+    # 傾き角度の計算
+    vec = np.array(bottom_edge_center) - np.array(top_edge_center)
+    angle_deg = np.degrees(np.arctan2(vec[1], vec[0]))
+
+    # 斜めにアライメントされた予測ライン（青線）を描画
+    for line in aligned_peaks_ends:
+        pt1 = (int(line[0][0]), int(line[0][1]))
+        pt2 = (int(line[1][0]), int(line[1][1]))
+        if 0 <= pt1[1] < 1000 and 0 <= pt2[1] < 1000:
+            cv2.line(display_img, pt1, pt2, (255, 60, 0), 2)
+
+    # 結果表示
+    st.image(display_img, use_column_width=True, caption=f"幾何学アライメント解析中（青線：レンズ湾曲・傾きを計算した予測ライン 角度:{angle_deg:.1f}度）")
+    
+    col1, col2 = st.columns(2)
+    col1.metric("幾何学アライメント判定結果", f"{final_ans} 段")
+    col2.metric("タワー構造の安定度（自信度）", f"{final_conf} %")
+    
+    st.caption(f"現在の算出データ ｜ 全体高: {bottom_edge_center[1]-top_edge_center[1]}px  1段の厚み: {current_pitch:.1f}px")
